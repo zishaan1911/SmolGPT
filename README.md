@@ -1,15 +1,12 @@
 # SmolGPT
 
-![CI](https://github.com/zishaanahmed/smolgpt/actions/workflows/ci.yml/badge.svg)
-![Tests](https://github.com/zishaanahmed/smolgpt/actions/workflows/tests.yml/badge.svg)
-
 A small GPT-style decoder-only transformer, trained from scratch on Colab,
 plus dataset suggestions for language model pretraining.
 
 ## Features
 
 - Custom decoder-only transformer (causal self-attention, MLP blocks) —
-  ~40M parameters (8 layers, 512 dim) by default
+  ~80M parameters (8 layers, 512 dim) by default
 - Trains on the full [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) dataset
 - Memory-safe tokenization: streams tokens straight to a memory-mapped
   `.bin` file instead of holding the whole dataset in RAM (fixes free-tier
