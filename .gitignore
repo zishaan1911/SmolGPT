@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# Model artifacts / data (these get regenerated, not tracked)
+*.bin
+*.pt
+mini_gpt_checkpoints/
+wandb/
+
+# Colab / Jupyter
+.ipynb_checkpoints/
