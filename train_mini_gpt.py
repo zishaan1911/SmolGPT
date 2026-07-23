@@ -62,38 +62,92 @@ config = {
     "checkpoint_interval": 500,
 }
 
-# %% [Cell 4] Load & tokenize a dataset
-# Full TinyStories (not just a 2% slice) -- still small enough to tokenize
-# in memory on Colab, and its simple, repetitive style is exactly what
-# makes small-from-scratch models produce coherent-sounding text quickly.
-raw_dataset = load_dataset("roneneldan/TinyStories", split="train")
-text = "\n".join(raw_dataset["text"])
-print(f"Loaded {len(text):,} characters of raw text")
+# %% [Cell 4] Load & tokenize a dataset — MEMORY-SAFE VERSION
+# The naive approach (join the whole dataset into one string, then
+# tokenize it all at once) holds several full copies of the data in RAM
+# at the same time and is exactly what crashes free Colab's ~12GB of
+# system RAM. Instead we tokenize in small batches and stream the token
+# ids straight to a memory-mapped file on disk, so peak RAM stays low
+# regardless of dataset size.
+import numpy as np
 
 enc = tiktoken.get_encoding("gpt2")
+EOT = enc.eot_token  # separates stories so the model learns story boundaries
 
-# Tokenizing the full dataset can take a few minutes -- cache it to Drive
-# so you don't redo this every time you reconnect.
-TOKEN_CACHE = os.path.join(CHECKPOINT_DIR, "tokens.pt")
-if os.path.exists(TOKEN_CACHE):
-    data = torch.load(TOKEN_CACHE)
-    print(f"Loaded cached tokens: {len(data):,}")
+TRAIN_BIN = os.path.join(CHECKPOINT_DIR, "train.bin")
+VAL_BIN = os.path.join(CHECKPOINT_DIR, "val.bin")
+
+if os.path.exists(TRAIN_BIN) and os.path.exists(VAL_BIN):
+    print("Found cached tokenized data on Drive, skipping re-tokenization.")
 else:
-    data = torch.tensor(enc.encode(text), dtype=torch.long)
-    torch.save(data, TOKEN_CACHE)
-    print(f"Encoded and cached {len(data):,} tokens")
+    raw_dataset = load_dataset("roneneldan/TinyStories", split="train")
+    split_dataset = raw_dataset.train_test_split(test_size=0.02, seed=42)
+    split_dataset["val"] = split_dataset.pop("test")
 
-n = int(0.95 * len(data))
-train_data = data[:n]
-val_data = data[n:]
+    def tokenize(example):
+        ids = enc.encode_ordinary(example["text"])  # skips special-token handling, a bit faster
+        ids.append(EOT)
+        return {"ids": ids, "len": len(ids)}
 
-# %% [Cell 5] Data loading helper
+    for split_name, dset in split_dataset.items():
+        # batched=True + num_proc keeps this fast without materializing
+        # everything at once; writer_batch_size caps Arrow's own buffering.
+        tokenized = dset.map(
+            tokenize,
+            remove_columns=["text"],
+            desc=f"tokenizing {split_name}",
+            num_proc=2,
+            writer_batch_size=1000,
+        )
+        arr_len = np.sum(tokenized["len"], dtype=np.uint64)
+        out_path = TRAIN_BIN if split_name == "train" else VAL_BIN
+        arr = np.memmap(out_path, dtype=np.uint16, mode="w+", shape=(arr_len,))
+
+        idx = 0
+        total_batches = 1024
+        for batch_idx in range(total_batches):
+            batch = tokenized.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format("numpy")
+            arr_batch = np.concatenate(batch["ids"])
+            arr[idx: idx + len(arr_batch)] = arr_batch
+            idx += len(arr_batch)
+        arr.flush()
+        print(f"Wrote {idx:,} tokens to {out_path}")
+
+# %% [Cell 5] Data loading helper (reads batches directly off disk)
 def get_batch(split):
-    d = train_data if split == "train" else val_data
+    # re-open the memmap each call — cheap, and avoids keeping the whole
+    # array pinned in RAM/refcounted across the training loop
+    path = TRAIN_BIN if split == "train" else VAL_BIN
+    d = np.memmap(path, dtype=np.uint16, mode="r")
     ix = torch.randint(len(d) - config["block_size"] - 1, (config["batch_size"],))
-    x = torch.stack([d[i:i + config["block_size"]] for i in ix])
-    y = torch.stack([d[i + 1:i + config["block_size"] + 1] for i in ix])
+    x = torch.stack([torch.from_numpy(d[i:i + config["block_size"]].astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy(d[i + 1:i + config["block_size"] + 1].astype(np.int64)) for i in ix])
     return x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+
+@torch.no_grad()
+def estimate_loss(model):
+    out = {}
+    model.eval()
+    for split in ["train", "val"]:
+        losses = torch.zeros(config["eval_iters"])
+        for k in range(config["eval_iters"]):
+            X, Y = get_batch(split)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=(device == "cuda")):
+                _, loss = model(X, Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean().item()
+    model.train()
+    return out
+
+def get_lr(it):
+    # linear warmup then cosine decay to min_lr
+    if it < config["warmup_iters"]:
+        return config["learning_rate"] * (it + 1) / config["warmup_iters"]
+    if it > config["max_iters"]:
+        return config["min_lr"]
+    decay_ratio = (it - config["warmup_iters"]) / (config["max_iters"] - config["warmup_iters"])
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return config["min_lr"] + coeff * (config["learning_rate"] - config["min_lr"])
 
 # %% [Cell 6] Model definition — a small GPT (decoder-only transformer)
 class CausalSelfAttention(nn.Module):
