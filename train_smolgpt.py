@@ -1,20 +1,8 @@
-# ============================================================
-# SMOLGPT v2 — Train a small language model from scratch on Colab
-# Now with: checkpointing/resume, Drive persistence, AMP (fast on T4),
-# cosine LR schedule, gradient clipping, loss-curve plotting, optional W&B
-# ============================================================
-# HOW TO USE:
-# 1. Open a new notebook at https://colab.research.google.com
-# 2. Runtime -> Change runtime type -> GPU (T4)
-# 3. Paste each "# %%" block into its own cell, run top to bottom
-# ============================================================
-
-# %% [Cell 1] Install dependencies
 !pip install -q torch datasets tiktoken tqdm matplotlib wandb
 
-# %% [Cell 2] (Optional but recommended) Mount Google Drive
-# This lets checkpoints survive a Colab disconnect/timeout — free Colab
-# sessions can be killed after ~12h or idle timeout, so don't skip this.
+
+
+
 from google.colab import drive
 drive.mount('/content/drive')
 
@@ -23,7 +11,7 @@ import os
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "smolgpt_ckpt.pt")
 
-# %% [Cell 3] Imports & config
+
 import math, time
 import torch
 import torch.nn as nn
@@ -35,14 +23,14 @@ from datasets import load_dataset
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Using device:", device)
 
-USE_WANDB = False  # flip to True if you want live dashboards (needs `wandb login` first)
+USE_WANDB = False
 if USE_WANDB:
     import wandb
-    wandb.login()  # will prompt for your API key the first time
+    wandb.login()
 
-# ---- Model / training hyperparameters ----
-# Bumped up slightly from v1 since AMP + a T4 can handle it, and a bigger
-# model matters more than anything else for "decent" generated text.
+
+
+
 config = {
     "vocab_size": 50257,
     "block_size": 256,
@@ -51,7 +39,7 @@ config = {
     "n_embd": 512,
     "dropout": 0.1,
     "batch_size": 32,
-    "grad_accum_steps": 2,     # effective batch size = batch_size * grad_accum_steps = 64
+    "grad_accum_steps": 2,
     "learning_rate": 3e-4,
     "min_lr": 3e-5,
     "warmup_iters": 200,
@@ -62,17 +50,17 @@ config = {
     "checkpoint_interval": 500,
 }
 
-# %% [Cell 4] Load & tokenize a dataset — MEMORY-SAFE VERSION
-# The naive approach (join the whole dataset into one string, then
-# tokenize it all at once) holds several full copies of the data in RAM
-# at the same time and is exactly what crashes free Colab's ~12GB of
-# system RAM. Instead we tokenize in small batches and stream the token
-# ids straight to a memory-mapped file on disk, so peak RAM stays low
-# regardless of dataset size.
+
+
+
+
+
+
+
 import numpy as np
 
 enc = tiktoken.get_encoding("gpt2")
-EOT = enc.eot_token  # separates stories so the model learns story boundaries
+EOT = enc.eot_token
 
 TRAIN_BIN = os.path.join(CHECKPOINT_DIR, "train.bin")
 VAL_BIN = os.path.join(CHECKPOINT_DIR, "val.bin")
@@ -85,13 +73,13 @@ else:
     split_dataset["val"] = split_dataset.pop("test")
 
     def tokenize(example):
-        ids = enc.encode_ordinary(example["text"])  # skips special-token handling, a bit faster
+        ids = enc.encode_ordinary(example["text"])
         ids.append(EOT)
         return {"ids": ids, "len": len(ids)}
 
     for split_name, dset in split_dataset.items():
-        # batched=True + num_proc keeps this fast without materializing
-        # everything at once; writer_batch_size caps Arrow's own buffering.
+
+
         tokenized = dset.map(
             tokenize,
             remove_columns=["text"],
@@ -113,10 +101,10 @@ else:
         arr.flush()
         print(f"Wrote {idx:,} tokens to {out_path}")
 
-# %% [Cell 5] Data loading helper (reads batches directly off disk)
+
 def get_batch(split):
-    # re-open the memmap each call — cheap, and avoids keeping the whole
-    # array pinned in RAM/refcounted across the training loop
+
+
     path = TRAIN_BIN if split == "train" else VAL_BIN
     d = np.memmap(path, dtype=np.uint16, mode="r")
     ix = torch.randint(len(d) - config["block_size"] - 1, (config["batch_size"],))
@@ -140,7 +128,7 @@ def estimate_loss(model):
     return out
 
 def get_lr(it):
-    # linear warmup then cosine decay to min_lr
+
     if it < config["warmup_iters"]:
         return config["learning_rate"] * (it + 1) / config["warmup_iters"]
     if it > config["max_iters"]:
@@ -149,7 +137,7 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return config["min_lr"] + coeff * (config["learning_rate"] - config["min_lr"])
 
-# %% [Cell 6] Model definition — a small GPT (decoder-only transformer)
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, cfg):
         super().__init__()
@@ -244,7 +232,7 @@ class SmolGPT(nn.Module):
             idx = torch.cat((idx, next_id), dim=1)
         return idx
 
-# %% [Cell 7] Build model + optimizer, resume from checkpoint if one exists
+
 model = SmolGPT(config).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"], betas=(0.9, 0.95), weight_decay=0.1)
 
@@ -281,7 +269,7 @@ def save_checkpoint(it):
     }, CHECKPOINT_PATH)
     print(f"  -> checkpoint saved at iter {it}")
 
-# %% [Cell 8] Train
+
 start = time.time()
 for it in range(start_iter, config["max_iters"]):
     lr = get_lr(it)
@@ -314,7 +302,7 @@ for it in range(start_iter, config["max_iters"]):
 save_checkpoint(config["max_iters"] - 1)
 print(f"Training complete in {time.time()-start:.0f}s")
 
-# %% [Cell 9] Plot loss curves
+
 plt.figure(figsize=(8, 5))
 plt.plot(loss_steps, train_losses, label="train loss")
 plt.plot(loss_steps, val_losses, label="val loss")
@@ -326,13 +314,13 @@ plt.grid(alpha=0.3)
 plt.savefig(os.path.join(CHECKPOINT_DIR, "loss_curve.png"))
 plt.show()
 
-# %% [Cell 10] Generate sample text
+
 model.eval()
 prompt = "Once upon a time"
 ids = torch.tensor([enc.encode(prompt)], dtype=torch.long, device=device)
 out = model.generate(ids, max_new_tokens=200, temperature=0.8, top_k=50)
 print(enc.decode(out[0].tolist()))
 
-# %% [Cell 11] (Optional) manually save a final standalone copy
+
 torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, "smolgpt_final_weights.pt"))
 print("Saved final weights to Drive.")
