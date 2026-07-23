@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint-and-syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install lint tools
+        run: pip install flake8
+
+      - name: Syntax check train_smolgpt.py (ignoring Colab '!' magics)
+        run: |
+          python - <<'PYEOF'
+          import ast
+          src = open("train_smolgpt.py").read()
+          src_clean = "\n".join(
+              line for line in src.split("\n") if not line.strip().startswith("!")
+          )
+          ast.parse(src_clean)
+          print("Syntax OK")
+          PYEOF
+
+      - name: Lint
+        run: flake8 tests --max-line-length=120 --extend-ignore=E203,W503
