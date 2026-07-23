@@ -1,81 +1,101 @@
 # ============================================================
-# MINI GPT — Train a small language model from scratch on Colab
+# MINI GPT v2 — Train a small language model from scratch on Colab
+# Now with: checkpointing/resume, Drive persistence, AMP (fast on T4),
+# cosine LR schedule, gradient clipping, loss-curve plotting, optional W&B
 # ============================================================
 # HOW TO USE:
 # 1. Open a new notebook at https://colab.research.google.com
-# 2. Runtime -> Change runtime type -> GPU (T4 is fine)
-# 3. Paste each "# %%" block below into its own cell (or just
-#    paste the whole file into one cell and run it)
+# 2. Runtime -> Change runtime type -> GPU (T4)
+# 3. Paste each "# %%" block into its own cell, run top to bottom
 # ============================================================
 
 # %% [Cell 1] Install dependencies
-!pip install -q torch datasets tiktoken tqdm
+!pip install -q torch datasets tiktoken tqdm matplotlib wandb
 
-# %% [Cell 2] Imports & config
-import math, os, time
+# %% [Cell 2] (Optional but recommended) Mount Google Drive
+# This lets checkpoints survive a Colab disconnect/timeout — free Colab
+# sessions can be killed after ~12h or idle timeout, so don't skip this.
+from google.colab import drive
+drive.mount('/content/drive')
+
+CHECKPOINT_DIR = "/content/drive/MyDrive/mini_gpt_checkpoints"
+import os
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "mini_gpt_ckpt.pt")
+
+# %% [Cell 3] Imports & config
+import math, time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+import matplotlib.pyplot as plt
 import tiktoken
 from datasets import load_dataset
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Using device:", device)
 
-# ---- Model / training hyperparameters (tune to your GPU) ----
+USE_WANDB = False  # flip to True if you want live dashboards (needs `wandb login` first)
+if USE_WANDB:
+    import wandb
+    wandb.login()  # will prompt for your API key the first time
+
+# ---- Model / training hyperparameters ----
+# Bumped up slightly from v1 since AMP + a T4 can handle it, and a bigger
+# model matters more than anything else for "decent" generated text.
 config = {
-    "vocab_size": 50257,      # GPT-2 tokenizer vocab size
-    "block_size": 256,        # context length (tokens per training sample)
-    "n_layer": 6,
-    "n_head": 6,
-    "n_embd": 384,
+    "vocab_size": 50257,
+    "block_size": 256,
+    "n_layer": 8,
+    "n_head": 8,
+    "n_embd": 512,
     "dropout": 0.1,
     "batch_size": 32,
+    "grad_accum_steps": 2,     # effective batch size = batch_size * grad_accum_steps = 64
     "learning_rate": 3e-4,
-    "max_iters": 3000,
+    "min_lr": 3e-5,
+    "warmup_iters": 200,
+    "max_iters": 6000,
     "eval_interval": 300,
     "eval_iters": 50,
+    "grad_clip": 1.0,
+    "checkpoint_interval": 500,
 }
 
-# %% [Cell 3] Load & tokenize a dataset
-# Swap "roneneldan/TinyStories" for any dataset in the suggestions
-# section below (e.g. "wikitext", "wikitext-103-raw-v1").
-raw_dataset = load_dataset("roneneldan/TinyStories", split="train[:2%]")  # small slice for a quick demo
+# %% [Cell 4] Load & tokenize a dataset
+# Full TinyStories (not just a 2% slice) -- still small enough to tokenize
+# in memory on Colab, and its simple, repetitive style is exactly what
+# makes small-from-scratch models produce coherent-sounding text quickly.
+raw_dataset = load_dataset("roneneldan/TinyStories", split="train")
 text = "\n".join(raw_dataset["text"])
 print(f"Loaded {len(text):,} characters of raw text")
 
 enc = tiktoken.get_encoding("gpt2")
-data = torch.tensor(enc.encode(text), dtype=torch.long)
-print(f"Encoded into {len(data):,} tokens")
 
-n = int(0.9 * len(data))
+# Tokenizing the full dataset can take a few minutes -- cache it to Drive
+# so you don't redo this every time you reconnect.
+TOKEN_CACHE = os.path.join(CHECKPOINT_DIR, "tokens.pt")
+if os.path.exists(TOKEN_CACHE):
+    data = torch.load(TOKEN_CACHE)
+    print(f"Loaded cached tokens: {len(data):,}")
+else:
+    data = torch.tensor(enc.encode(text), dtype=torch.long)
+    torch.save(data, TOKEN_CACHE)
+    print(f"Encoded and cached {len(data):,} tokens")
+
+n = int(0.95 * len(data))
 train_data = data[:n]
 val_data = data[n:]
 
-# %% [Cell 4] Data loading helper
+# %% [Cell 5] Data loading helper
 def get_batch(split):
     d = train_data if split == "train" else val_data
     ix = torch.randint(len(d) - config["block_size"] - 1, (config["batch_size"],))
     x = torch.stack([d[i:i + config["block_size"]] for i in ix])
     y = torch.stack([d[i + 1:i + config["block_size"] + 1] for i in ix])
-    return x.to(device), y.to(device)
+    return x.to(device, non_blocking=True), y.to(device, non_blocking=True)
 
-@torch.no_grad()
-def estimate_loss(model):
-    out = {}
-    model.eval()
-    for split in ["train", "val"]:
-        losses = torch.zeros(config["eval_iters"])
-        for k in range(config["eval_iters"]):
-            X, Y = get_batch(split)
-            _, loss = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean().item()
-    model.train()
-    return out
-
-# %% [Cell 5] Model definition — a small GPT (decoder-only transformer)
+# %% [Cell 6] Model definition — a small GPT (decoder-only transformer)
 class CausalSelfAttention(nn.Module):
     def __init__(self, cfg):
         super().__init__()
@@ -170,31 +190,95 @@ class MiniGPT(nn.Module):
             idx = torch.cat((idx, next_id), dim=1)
         return idx
 
-# %% [Cell 6] Train
+# %% [Cell 7] Build model + optimizer, resume from checkpoint if one exists
 model = MiniGPT(config).to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"], betas=(0.9, 0.95), weight_decay=0.1)
+
+start_iter = 0
+train_losses, val_losses, loss_steps = [], [], []
+
+if os.path.exists(CHECKPOINT_PATH):
+    print("Found existing checkpoint — resuming training from it.")
+    ckpt = torch.load(CHECKPOINT_PATH, map_location=device)
+    model.load_state_dict(ckpt["model"])
+    optimizer.load_state_dict(ckpt["optimizer"])
+    start_iter = ckpt["iter"] + 1
+    train_losses = ckpt.get("train_losses", [])
+    val_losses = ckpt.get("val_losses", [])
+    loss_steps = ckpt.get("loss_steps", [])
+    print(f"Resumed at iteration {start_iter}")
+else:
+    print(f"No checkpoint found at {CHECKPOINT_PATH} — starting fresh.")
+
 print(f"Model has {sum(p.numel() for p in model.parameters())/1e6:.1f}M parameters")
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"])
+if USE_WANDB:
+    wandb.init(project="mini-gpt-colab", config=config, resume="allow")
 
+def save_checkpoint(it):
+    torch.save({
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "iter": it,
+        "config": config,
+        "train_losses": train_losses,
+        "val_losses": val_losses,
+        "loss_steps": loss_steps,
+    }, CHECKPOINT_PATH)
+    print(f"  -> checkpoint saved at iter {it}")
+
+# %% [Cell 8] Train
 start = time.time()
-for it in range(config["max_iters"]):
+for it in range(start_iter, config["max_iters"]):
+    lr = get_lr(it)
+    for pg in optimizer.param_groups:
+        pg["lr"] = lr
+
     if it % config["eval_interval"] == 0 or it == config["max_iters"] - 1:
         losses = estimate_loss(model)
         print(f"step {it}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, "
-              f"elapsed {time.time()-start:.0f}s")
+              f"lr {lr:.2e}, elapsed {time.time()-start:.0f}s")
+        train_losses.append(losses["train"])
+        val_losses.append(losses["val"])
+        loss_steps.append(it)
+        if USE_WANDB:
+            wandb.log({"train_loss": losses["train"], "val_loss": losses["val"], "lr": lr, "iter": it})
 
-    xb, yb = get_batch("train")
-    _, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
-    loss.backward()
+    for micro_step in range(config["grad_accum_steps"]):
+        xb, yb = get_batch("train")
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=(device == "cuda")):
+            _, loss = model(xb, yb)
+            loss = loss / config["grad_accum_steps"]
+        loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip"])
     optimizer.step()
 
-# %% [Cell 7] Generate sample text
+    if it > 0 and it % config["checkpoint_interval"] == 0:
+        save_checkpoint(it)
+
+save_checkpoint(config["max_iters"] - 1)
+print(f"Training complete in {time.time()-start:.0f}s")
+
+# %% [Cell 9] Plot loss curves
+plt.figure(figsize=(8, 5))
+plt.plot(loss_steps, train_losses, label="train loss")
+plt.plot(loss_steps, val_losses, label="val loss")
+plt.xlabel("iteration")
+plt.ylabel("loss")
+plt.title("Mini GPT training curves")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.savefig(os.path.join(CHECKPOINT_DIR, "loss_curve.png"))
+plt.show()
+
+# %% [Cell 10] Generate sample text
+model.eval()
 prompt = "Once upon a time"
 ids = torch.tensor([enc.encode(prompt)], dtype=torch.long, device=device)
 out = model.generate(ids, max_new_tokens=200, temperature=0.8, top_k=50)
 print(enc.decode(out[0].tolist()))
 
-# %% [Cell 8] Save checkpoint (download it from Colab's file browser)
-torch.save(model.state_dict(), "mini_gpt.pt")
-print("Saved to mini_gpt.pt")
+# %% [Cell 11] (Optional) manually save a final standalone copy
+torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, "mini_gpt_final_weights.pt"))
+print("Saved final weights to Drive.")
