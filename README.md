@@ -1,5 +1,8 @@
 # SmolGPT
 
+![CI](https://github.com/zishaanahmed/smolgpt/actions/workflows/ci.yml/badge.svg)
+![Tests](https://github.com/zishaanahmed/smolgpt/actions/workflows/tests.yml/badge.svg)
+
 A small GPT-style decoder-only transformer, trained from scratch on Colab,
 plus dataset suggestions for language model pretraining.
 
