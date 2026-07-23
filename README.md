@@ -1,4 +1,4 @@
-# Mini GPT — Colab
+# SmolGPT
 
 A small GPT-style decoder-only transformer, trained from scratch on Colab,
 plus dataset suggestions for language model pretraining.
@@ -19,7 +19,7 @@ plus dataset suggestions for language model pretraining.
 
 ## Usage
 
-1. Open `train_mini_gpt.py` in Google Colab (Runtime -> Change runtime
+1. Open `train_smolgpt.py` in Google Colab (Runtime -> Change runtime
    type -> GPU, T4 is fine on the free tier).
 2. Paste each `# %%` block into its own cell (or paste the whole file
    into one cell and run it top to bottom).

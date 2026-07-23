@@ -1,5 +1,5 @@
 # ============================================================
-# MINI GPT v2 — Train a small language model from scratch on Colab
+# SMOLGPT v2 — Train a small language model from scratch on Colab
 # Now with: checkpointing/resume, Drive persistence, AMP (fast on T4),
 # cosine LR schedule, gradient clipping, loss-curve plotting, optional W&B
 # ============================================================
@@ -18,10 +18,10 @@
 from google.colab import drive
 drive.mount('/content/drive')
 
-CHECKPOINT_DIR = "/content/drive/MyDrive/mini_gpt_checkpoints"
+CHECKPOINT_DIR = "/content/drive/MyDrive/smolgpt_checkpoints"
 import os
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "mini_gpt_ckpt.pt")
+CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "smolgpt_ckpt.pt")
 
 # %% [Cell 3] Imports & config
 import math, time
@@ -205,7 +205,7 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln2(x))
         return x
 
-class MiniGPT(nn.Module):
+class SmolGPT(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
@@ -245,7 +245,7 @@ class MiniGPT(nn.Module):
         return idx
 
 # %% [Cell 7] Build model + optimizer, resume from checkpoint if one exists
-model = MiniGPT(config).to(device)
+model = SmolGPT(config).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"], betas=(0.9, 0.95), weight_decay=0.1)
 
 start_iter = 0
@@ -267,7 +267,7 @@ else:
 print(f"Model has {sum(p.numel() for p in model.parameters())/1e6:.1f}M parameters")
 
 if USE_WANDB:
-    wandb.init(project="mini-gpt-colab", config=config, resume="allow")
+    wandb.init(project="smolgpt", config=config, resume="allow")
 
 def save_checkpoint(it):
     torch.save({
@@ -320,7 +320,7 @@ plt.plot(loss_steps, train_losses, label="train loss")
 plt.plot(loss_steps, val_losses, label="val loss")
 plt.xlabel("iteration")
 plt.ylabel("loss")
-plt.title("Mini GPT training curves")
+plt.title("SmolGPT training curves")
 plt.legend()
 plt.grid(alpha=0.3)
 plt.savefig(os.path.join(CHECKPOINT_DIR, "loss_curve.png"))
@@ -334,5 +334,5 @@ out = model.generate(ids, max_new_tokens=200, temperature=0.8, top_k=50)
 print(enc.decode(out[0].tolist()))
 
 # %% [Cell 11] (Optional) manually save a final standalone copy
-torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, "mini_gpt_final_weights.pt"))
+torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, "smolgpt_final_weights.pt"))
 print("Saved final weights to Drive.")
