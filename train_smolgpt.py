@@ -1,17 +1,7 @@
-!pip install -q torch datasets tiktoken tqdm matplotlib wandb
+!pip install -q torch datasets tiktoken tqdm matplotlib wandb huggingface_hub
 
 
-
-
-from google.colab import drive
-drive.mount('/content/drive')
-
-CHECKPOINT_DIR = "/content/drive/MyDrive/smolgpt_checkpoints"
 import os
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "smolgpt_ckpt.pt")
-
-
 import math, time
 import torch
 import torch.nn as nn
@@ -19,6 +9,60 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import tiktoken
 from datasets import load_dataset
+from huggingface_hub import HfApi, hf_hub_download, create_repo, login
+
+HF_TOKEN = ""  # <-- put your token here, or leave blank to be prompted
+HF_REPO_ID = "your-username/smolgpt-checkpoints"  # <-- change to your own repo id
+HF_REPO_PRIVATE = True
+
+if HF_TOKEN:
+    login(token=HF_TOKEN)
+else:
+    login()  # will prompt for a token if not already cached
+
+api = HfApi()
+create_repo(HF_REPO_ID, private=HF_REPO_PRIVATE, exist_ok=True)
+
+# Local scratch dir (ephemeral Colab disk — fine, since the Hub is now the source of truth)
+CHECKPOINT_DIR = "/content/smolgpt_checkpoints"
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "smolgpt_ckpt.pt")
+CHECKPOINT_HUB_FILENAME = "smolgpt_ckpt.pt"
+
+TRAIN_BIN = os.path.join(CHECKPOINT_DIR, "train.bin")
+VAL_BIN = os.path.join(CHECKPOINT_DIR, "val.bin")
+TRAIN_BIN_HUB_FILENAME = "train.bin"
+VAL_BIN_HUB_FILENAME = "val.bin"
+
+
+def hub_file_exists(filename):
+    try:
+        api.hf_hub_download(repo_id=HF_REPO_ID, filename=filename)
+        return True
+    except Exception:
+        return False
+
+
+def download_from_hub_if_exists(filename, local_path):
+    """Try to pull a file down from the Hub repo. Returns True if found."""
+    try:
+        downloaded_path = hf_hub_download(repo_id=HF_REPO_ID, filename=filename)
+        # hf_hub_download caches to its own dir; copy/symlink to our expected local path
+        if downloaded_path != local_path:
+            import shutil
+            shutil.copy(downloaded_path, local_path)
+        return True
+    except Exception:
+        return False
+
+
+def upload_to_hub(local_path, filename):
+    api.upload_file(
+        path_or_fileobj=local_path,
+        path_in_repo=filename,
+        repo_id=HF_REPO_ID,
+    )
+
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Using device:", device)
@@ -29,21 +73,19 @@ if USE_WANDB:
     wandb.login()
 
 
-
-
 config = {
     "vocab_size": 50257,
     "block_size": 256,
     "n_layer": 8,
     "n_head": 8,
     "n_embd": 512,
-    "dropout": 0.1,
+    "dropout": 0.0,
     "batch_size": 32,
     "grad_accum_steps": 2,
     "learning_rate": 3e-4,
     "min_lr": 3e-5,
     "warmup_iters": 200,
-    "max_iters": 6000,
+    "max_iters": 50000,
     "eval_interval": 300,
     "eval_iters": 50,
     "grad_clip": 1.0,
@@ -51,22 +93,17 @@ config = {
 }
 
 
-
-
-
-
-
-
 import numpy as np
 
 enc = tiktoken.get_encoding("gpt2")
 EOT = enc.eot_token
 
-TRAIN_BIN = os.path.join(CHECKPOINT_DIR, "train.bin")
-VAL_BIN = os.path.join(CHECKPOINT_DIR, "val.bin")
+# Try to reuse already-tokenized data from the Hub first (saves ~10-20 min per fresh run)
+found_train = download_from_hub_if_exists(TRAIN_BIN_HUB_FILENAME, TRAIN_BIN)
+found_val = download_from_hub_if_exists(VAL_BIN_HUB_FILENAME, VAL_BIN)
 
-if os.path.exists(TRAIN_BIN) and os.path.exists(VAL_BIN):
-    print("Found cached tokenized data on Drive, skipping re-tokenization.")
+if found_train and found_val:
+    print("Found cached tokenized data on the Hub, skipping re-tokenization.")
 else:
     raw_dataset = load_dataset("roneneldan/TinyStories", split="train")
     split_dataset = raw_dataset.train_test_split(test_size=0.02, seed=42)
@@ -78,7 +115,6 @@ else:
         return {"ids": ids, "len": len(ids)}
 
     for split_name, dset in split_dataset.items():
-
 
         tokenized = dset.map(
             tokenize,
@@ -101,9 +137,14 @@ else:
         arr.flush()
         print(f"Wrote {idx:,} tokens to {out_path}")
 
+        # Push tokenized bin up to the Hub so future runs (or a crashed/restarted
+        # session) don't have to re-tokenize from scratch.
+        hub_filename = TRAIN_BIN_HUB_FILENAME if split_name == "train" else VAL_BIN_HUB_FILENAME
+        print(f"Uploading {hub_filename} to the Hub...")
+        upload_to_hub(out_path, hub_filename)
+
 
 def get_batch(split):
-
 
     path = TRAIN_BIN if split == "train" else VAL_BIN
     d = np.memmap(path, dtype=np.uint16, mode="r")
@@ -203,6 +244,10 @@ class SmolGPT(nn.Module):
         self.blocks = nn.Sequential(*[Block(cfg) for _ in range(cfg["n_layer"])])
         self.ln_f = nn.LayerNorm(cfg["n_embd"])
         self.head = nn.Linear(cfg["n_embd"], cfg["vocab_size"], bias=False)
+        # Weight tying: share the embedding and output projection matrices.
+        # Free quality win for small models - fewer independent params to learn,
+        # better-calibrated logits.
+        self.head.weight = self.tok_emb.weight
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
@@ -219,14 +264,31 @@ class SmolGPT(nn.Module):
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, top_p=None, repetition_penalty=1.0):
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.cfg["block_size"]:]
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :] / temperature
+
+            # Repetition penalty: discourage tokens already generated
+            if repetition_penalty != 1.0:
+                for b in range(idx.size(0)):
+                    prev_tokens = idx[b].unique()
+                    logits[b, prev_tokens] /= repetition_penalty
+
             if top_k is not None:
                 v, _ = torch.topk(logits, top_k)
                 logits[logits < v[:, [-1]]] = -float("Inf")
+
+            if top_p is not None:
+                sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
+                cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                sorted_mask = cum_probs > top_p
+                sorted_mask[:, 1:] = sorted_mask[:, :-1].clone()
+                sorted_mask[:, 0] = False
+                mask = sorted_mask.scatter(1, sorted_idx, sorted_mask)
+                logits[mask] = -float("Inf")
+
             probs = F.softmax(logits, dim=-1)
             next_id = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, next_id), dim=1)
@@ -239,8 +301,8 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"], be
 start_iter = 0
 train_losses, val_losses, loss_steps = [], [], []
 
-if os.path.exists(CHECKPOINT_PATH):
-    print("Found existing checkpoint — resuming training from it.")
+if download_from_hub_if_exists(CHECKPOINT_HUB_FILENAME, CHECKPOINT_PATH):
+    print("Found existing checkpoint on the Hub — resuming training from it.")
     ckpt = torch.load(CHECKPOINT_PATH, map_location=device)
     model.load_state_dict(ckpt["model"])
     optimizer.load_state_dict(ckpt["optimizer"])
@@ -250,7 +312,7 @@ if os.path.exists(CHECKPOINT_PATH):
     loss_steps = ckpt.get("loss_steps", [])
     print(f"Resumed at iteration {start_iter}")
 else:
-    print(f"No checkpoint found at {CHECKPOINT_PATH} — starting fresh.")
+    print(f"No checkpoint found on the Hub repo {HF_REPO_ID} — starting fresh.")
 
 print(f"Model has {sum(p.numel() for p in model.parameters())/1e6:.1f}M parameters")
 
@@ -267,7 +329,9 @@ def save_checkpoint(it):
         "val_losses": val_losses,
         "loss_steps": loss_steps,
     }, CHECKPOINT_PATH)
-    print(f"  -> checkpoint saved at iter {it}")
+    print(f"  -> checkpoint saved locally at iter {it}, uploading to Hub...")
+    upload_to_hub(CHECKPOINT_PATH, CHECKPOINT_HUB_FILENAME)
+    print(f"  -> checkpoint uploaded to {HF_REPO_ID}")
 
 
 start = time.time()
@@ -311,16 +375,20 @@ plt.ylabel("loss")
 plt.title("SmolGPT training curves")
 plt.legend()
 plt.grid(alpha=0.3)
-plt.savefig(os.path.join(CHECKPOINT_DIR, "loss_curve.png"))
+loss_curve_path = os.path.join(CHECKPOINT_DIR, "loss_curve.png")
+plt.savefig(loss_curve_path)
+upload_to_hub(loss_curve_path, "loss_curve.png")
 plt.show()
 
 
 model.eval()
 prompt = "Once upon a time"
 ids = torch.tensor([enc.encode(prompt)], dtype=torch.long, device=device)
-out = model.generate(ids, max_new_tokens=200, temperature=0.8, top_k=50)
+out = model.generate(ids, max_new_tokens=200, temperature=0.8, top_k=50, top_p=0.9, repetition_penalty=1.2)
 print(enc.decode(out[0].tolist()))
 
 
-torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, "smolgpt_final_weights.pt"))
-print("Saved final weights to Drive.")
+final_weights_path = os.path.join(CHECKPOINT_DIR, "smolgpt_final_weights.pt")
+torch.save(model.state_dict(), final_weights_path)
+upload_to_hub(final_weights_path, "smolgpt_final_weights.pt")
+print(f"Saved final weights to the Hub repo {HF_REPO_ID}.")
