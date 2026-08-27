@@ -12,3 +12,7 @@ wandb/
 .ipynb_checkpoints/
 .pytest_cache/
 *.egg-info/
+smolgpt-hf/
+*.pt
+*.safetensors
+*.bin
