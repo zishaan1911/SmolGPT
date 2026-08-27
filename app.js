@@ -163,25 +163,59 @@ function setStatus(kind, text) {
   statusText.textContent = text;
 }
 
+async function detectRealWebGPU() {
+  // navigator.gpu can exist even when no real adapter is obtainable
+  // (missing driver support, disabled flags, blocklisted GPU, etc).
+  // Actually request an adapter so we only pick webgpu when it will truly work.
+  if (!("gpu" in navigator)) return false;
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    return !!adapter;
+  } catch {
+    return false;
+  }
+}
+
+async function loadWithDevice(device) {
+  return pipeline("text-generation", MODEL_ID, {
+    dtype: "fp32",
+    device,
+    progress_callback: (p) => {
+      if (p.status === "progress" && p.total) {
+        const pct = Math.round((p.loaded / p.total) * 100);
+        progressFill.style.width = pct + "%";
+        loadDetail.textContent = `${p.file || "weights"} — ${pct}% (${(p.loaded / 1e6).toFixed(1)}MB / ${(p.total / 1e6).toFixed(1)}MB)`;
+      } else if (p.status === "done") {
+        loadDetail.textContent = `${p.file || "file"} ready`;
+      }
+    },
+  });
+}
+
 async function initModel() {
-  const useWebGPU = "gpu" in navigator;
-  readoutBackend.textContent = useWebGPU ? "webgpu" : "wasm";
-  setStatus("loading", useWebGPU ? "loading on webgpu…" : "loading on cpu (wasm)…");
+  const hasWebGPU = await detectRealWebGPU();
+  let device = hasWebGPU ? "webgpu" : "wasm";
+  readoutBackend.textContent = device;
+  setStatus("loading", `loading on ${device === "webgpu" ? "webgpu" : "cpu (wasm)"}…`);
 
   try {
-    generator = await pipeline("text-generation", MODEL_ID, {
-      dtype: "fp32",
-      device: useWebGPU ? "webgpu" : "wasm",
-      progress_callback: (p) => {
-        if (p.status === "progress" && p.total) {
-          const pct = Math.round((p.loaded / p.total) * 100);
-          progressFill.style.width = pct + "%";
-          loadDetail.textContent = `${p.file || "weights"} — ${pct}% (${(p.loaded / 1e6).toFixed(1)}MB / ${(p.total / 1e6).toFixed(1)}MB)`;
-        } else if (p.status === "done") {
-          loadDetail.textContent = `${p.file || "file"} ready`;
-        }
-      },
-    });
+    try {
+      generator = await loadWithDevice(device);
+    } catch (err) {
+      // WebGPU can still fail at model-load time even after a successful
+      // adapter request (driver quirks, unsupported ops, etc) — fall back to wasm.
+      if (device === "webgpu") {
+        console.warn("WebGPU load failed, falling back to wasm:", err);
+        device = "wasm";
+        readoutBackend.textContent = device;
+        setStatus("loading", "webgpu failed — retrying on cpu (wasm)…");
+        progressFill.style.width = "0%";
+        generator = await loadWithDevice(device);
+      } else {
+        throw err;
+      }
+    }
+
     modelReady = true;
     setStatus("ready", "ready — running locally");
     loadTitle.textContent = "SmolGPT is ready 🌱";
