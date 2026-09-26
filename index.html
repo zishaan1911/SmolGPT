@@ -1,137 +1,179 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SmolGPT</title>
-  <link rel="stylesheet" href="style.css" />
-</head>
-<body>
-  <div class="app">
-
-    <aside class="sidebar" id="sidebar">
-      <div class="sidebar-top">
-        <div class="brand">
-          <div class="brand-text">
-            <span class="brand-name">SmolGPT</span>
-            <span class="brand-sub">nanoGPT · TinyStories</span>
-          </div>
-        </div>
-
-        <button class="new-chat-btn" id="newChatBtn" title="New conversation">
-          <span aria-hidden="true">+</span>
-          <span>New conversation</span>
-        </button>
-      </div>
-
-      <div class="history-list" id="historyList">
-        <!-- conversation items injected here -->
-      </div>
-
-      <div class="sidebar-bottom">
-        <div class="status-chip" id="statusChip">
-          <span class="status-dot" id="statusDot"></span>
-          <span id="statusText">Starting model</span>
-        </div>
-
-        <div class="terminal-readout" id="terminalReadout">
-          <div class="readout-row"><span>backend</span><span id="readoutBackend">N/A</span></div>
-          <div class="readout-row"><span>tok/s</span><span id="readoutSpeed">N/A</span></div>
-          <div class="readout-row"><span>params</span><span id="readoutParams">~500M</span></div>
-        </div>
-      </div>
-    </aside>
-
-    <main class="main">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f6f1e7" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#14130f" media="(prefers-color-scheme: dark)" />
+    <meta
+      name="description"
+      content="SmolGPT: a 51M-parameter GPT trained from scratch on TinyStories, running entirely in your browser. Start a story and it writes the rest."
+    />
+    <title>SmolGPT · a tiny GPT that writes stories</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231f5c57'/><text x='16' y='22' font-family='Georgia' font-size='17' fill='%23f6f1e7' text-anchor='middle'>s</text></svg>" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="style.css?v=3" />
+  </head>
+  <body>
+    <div class="app">
       <header class="topbar">
-        <button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle sidebar">
-          <span></span>
-          <span></span>
-          <span></span>
-        </button>
-
-        <div class="topbar-title">
+        <a class="wordmark" href="./" aria-label="SmolGPT home">
+          <span class="mark" aria-hidden="true">s</span>
           <span>SmolGPT</span>
-          <span class="topbar-tag">runs locally in your browser</span>
-        </div>
-
-        <div class="topbar-right">
-          <a class="hf-link" href="https://huggingface.co/zishaan1911/smolGPT" target="_blank" rel="noopener">
-            Hugging Face
-          </a>
-        </div>
+        </a>
+        <span class="tagline">a 51M-parameter GPT that writes children's stories, running in your browser</span>
+        <nav class="links">
+          <a href="https://huggingface.co/zishaan1911/smolGPT" target="_blank" rel="noopener">model</a>
+          <a href="https://github.com/zishaan1911/SmolGPT" target="_blank" rel="noopener">source</a>
+          <button class="icon-btn panel-toggle" id="panelToggle" aria-controls="panel" aria-expanded="false">
+            settings
+          </button>
+        </nav>
       </header>
 
-      <div class="load-banner" id="loadBanner">
-        <div class="load-banner-inner">
-          <div class="load-text">
-            <div class="load-title" id="loadTitle">Loading model</div>
-            <div class="progress-track">
-              <div class="progress-fill" id="progressFill"></div>
+      <div class="layout">
+        <main class="desk">
+          <div class="loader" id="loader" role="status" aria-live="polite">
+            <div class="loader-row">
+              <span class="loader-title" id="loaderTitle">Fetching the model</span>
+              <span class="loader-meta" id="loaderMeta"></span>
             </div>
-            <div class="load-detail" id="loadDetail">Downloading weights. They will be cached after the first visit.</div>
+            <div class="bar"><div class="bar-fill" id="loaderFill"></div></div>
+            <div class="loader-note" id="loaderNote">
+              One-time download of about 300 MB; your browser caches it. You can start writing while it loads.
+            </div>
           </div>
-        </div>
-      </div>
 
-      <section class="chat-scroll" id="chatScroll">
-        <div class="empty-state" id="emptyState">
-          <div class="empty-mark">SMOLGPT</div>
-          <h1>A tiny GPT for tiny stories.</h1>
-          <p>
-            Trained from scratch on children's stories and running entirely on your device.
-            Your input stays in the browser.
+          <div class="page-toolbar">
+            <input
+              class="story-title"
+              id="storyTitle"
+              aria-label="Story title"
+              placeholder="Untitled story"
+              maxlength="80"
+            />
+            <div class="tools">
+              <button class="tool" id="undoBtn" title="Remove the last passage">undo</button>
+              <button class="tool" id="retryBtn" title="Rewrite SmolGPT's last passage">rewrite</button>
+              <button class="tool" id="copyBtn" title="Copy the story">copy</button>
+            </div>
+          </div>
+
+          <article class="manuscript" id="manuscript">
+            <div class="starter" id="starter">
+              <p class="starter-lede">
+                Write the first line of a story. SmolGPT continues it in <span class="ink-model">this ink</span>,
+                one word at a time, entirely on your device.
+              </p>
+              <div class="starter-chips" id="starterChips">
+                <button class="chip">Once upon a time, there was a little dragon who was afraid of the dark.</button>
+                <button class="chip">Lily found a shiny key under the old oak tree.</button>
+                <button class="chip">Tom and his dog Max wanted to build the biggest sandcastle on the beach.</button>
+                <button class="chip">The moon was sad because nobody said goodnight to it.</button>
+              </div>
+            </div>
+            <div class="story" id="story" aria-live="polite"></div>
+          </article>
+
+          <form class="composer" id="composer">
+            <textarea
+              id="input"
+              rows="1"
+              placeholder="Add the next line, or leave it empty and let SmolGPT carry on…"
+              aria-label="Your next line"
+            ></textarea>
+            <button type="submit" class="go" id="goBtn" disabled>
+              <span id="goLabel">continue</span>
+              <kbd id="goKey">↵</kbd>
+            </button>
+          </form>
+          <p class="composer-hint">
+            SmolGPT is a story-continuation model, not a chatbot: it keeps writing whatever it is given.
           </p>
+        </main>
 
-          <div class="suggestion-row">
-            <button class="suggestion-chip" data-prompt="Once upon a time, in a small village,">
-              Once upon a time, in a small village,
-            </button>
-            <button class="suggestion-chip" data-prompt="The little robot looked up at the stars and">
-              The little robot looked up at the stars and
-            </button>
-            <button class="suggestion-chip" data-prompt="Every morning, the old fox would">
-              Every morning, the old fox would
-            </button>
-          </div>
-        </div>
+        <aside class="panel" id="panel" aria-label="Controls">
+          <section class="card">
+            <h2>Library</h2>
+            <button class="new-story" id="newStoryBtn">+ new story</button>
+            <ul class="library" id="library"></ul>
+          </section>
 
-        <div class="messages" id="messages"></div>
-      </section>
+          <section class="card">
+            <h2>Context window</h2>
+            <div class="ctx-meter" aria-hidden="true">
+              <span class="ctx-prompt" id="ctxPrompt"></span>
+              <span class="ctx-new" id="ctxNew"></span>
+            </div>
+            <div class="ctx-legend">
+              <span><i class="sw sw-prompt"></i>story <b id="ctxPromptN">0</b></span>
+              <span><i class="sw sw-new"></i>new <b id="ctxNewN">0</b></span>
+              <span class="ctx-total"><b id="ctxUsed">0</b> / 256</span>
+            </div>
+            <p class="fine" id="ctxNote">
+              The model sees 256 tokens at once: the end of your story plus the words it is about to write.
+            </p>
+          </section>
 
-      <form class="composer" id="composerForm">
-        <div class="composer-inner">
-          <textarea
-            id="promptInput"
-            class="composer-input"
-            placeholder="Start a story, or continue one..."
-            rows="1"
-            disabled
-          ></textarea>
-
-          <div class="composer-controls">
-            <label class="length-control" title="How many new tokens to generate">
-              <span>length</span>
-              <select id="lengthSelect">
-                <option value="60">short</option>
-                <option value="120" selected>medium</option>
-                <option value="220">long</option>
-              </select>
+          <section class="card">
+            <h2>Sampling</h2>
+            <label class="knob">
+              <span>length <output id="lenOut">120</output> tokens</span>
+              <input type="range" id="len" min="20" max="200" step="10" value="120" />
             </label>
+            <label class="knob">
+              <span>temperature <output id="tempOut">0.80</output></span>
+              <input type="range" id="temp" min="0.1" max="1.5" step="0.05" value="0.8" />
+            </label>
+            <label class="knob">
+              <span>top-k <output id="topkOut">40</output></span>
+              <input type="range" id="topk" min="0" max="100" step="1" value="40" />
+            </label>
+            <label class="knob">
+              <span>repetition penalty <output id="repOut">1.10</output></span>
+              <input type="range" id="rep" min="1" max="1.5" step="0.01" value="1.1" />
+            </label>
+            <button class="reset" id="resetKnobs" type="button">reset defaults</button>
+          </section>
 
-            <button type="submit" class="send-btn" id="sendBtn" disabled title="Generate">
-              <span aria-hidden="true">→</span>
-            </button>
-          </div>
-        </div>
+          <section class="card">
+            <h2>Runtime</h2>
+            <dl class="readout">
+              <dt>status</dt><dd id="rStatus">loading</dd>
+              <dt>backend</dt><dd id="rBackend">…</dd>
+              <dt>first token</dt><dd id="rFirst">–</dd>
+              <dt>speed</dt><dd id="rSpeed">–</dd>
+              <dt>last run</dt><dd id="rLast">–</dd>
+            </dl>
+          </section>
 
-        <div class="composer-hint">
-          SmolGPT continues text rather than chatting turn by turn. Give it an opening line and let it write.
-        </div>
-      </form>
-    </main>
-  </div>
-
-  <script type="module" src="app.js"></script>
-</body>
+          <section class="card">
+            <h2>Model</h2>
+            <dl class="readout">
+              <dt>parameters</dt><dd>51.1M</dd>
+              <dt>architecture</dt><dd>GPT-2 style decoder</dd>
+              <dt>layers × heads</dt><dd>8 × 8</dd>
+              <dt>width</dt><dd>512</dd>
+              <dt>context</dt><dd>256 tokens</dd>
+              <dt>vocabulary</dt><dd>50,257 (GPT-2 BPE)</dd>
+              <dt>training data</dt><dd>TinyStories, 465M tokens</dd>
+              <dt>weights</dt><dd>ONNX, fp32</dd>
+            </dl>
+            <p class="fine">
+              Trained from scratch in PyTorch, with the embedding and output layers sharing weights.
+              <a href="https://github.com/zishaan1911/SmolGPT/blob/master/train_smolgpt.py" target="_blank" rel="noopener">Training code →</a>
+            </p>
+          </section>
+        </aside>
+      </div>
+      <div class="scrim" id="scrim" hidden></div>
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </div>
+    <script type="module" src="app.js?v=3"></script>
+  </body>
 </html>
